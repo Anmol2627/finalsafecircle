@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Body
+from fastapi import FastAPI, APIRouter, HTTPException, Body, Depends
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -8,25 +8,29 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from seed import get_mock_users, get_mock_incidents
 from mock_db import MockClient
+from passlib.hash import bcrypt
+import jwt
+from twilio.rest import Client as TwilioClient
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
 mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+jwt_secret = os.environ.get('JWT_SECRET', 'change-me-in-env')
+jwt_algorithm = os.environ.get('JWT_ALGORITHM', 'HS256')
+access_token_expires_minutes = int(os.environ.get('ACCESS_TOKEN_EXPIRES_MIN', '60'))
 try:
-    # Try to connect to real MongoDB if available, otherwise use Mock
-    # Since AsyncIOMotorClient is lazy, we can't easily check here.
-    # For this environment, we'll default to MockClient to ensure it works without external dependencies.
-    # To use real MongoDB, uncomment the following lines and comment out MockClient:
-    # client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
-    
-    logger = logging.getLogger("uvicorn")
-    logger.info("Using In-Memory Mock Database (data will reset on restart)")
-    client = MockClient(mongo_url)
+    use_mock = os.environ.get('USE_MOCK_DB', 'false').lower() == 'true'
+    if use_mock:
+        logger = logging.getLogger("uvicorn")
+        logger.info("Using In-Memory Mock Database (data will reset on restart)")
+        client = MockClient(mongo_url)
+    else:
+        client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
 except Exception as e:
     print(f"Error initializing DB client: {e}")
     client = MockClient(mongo_url)
@@ -77,6 +81,18 @@ class User(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+class SignupRequest(BaseModel):
+    name: str
+    email: str
+    phone: Optional[str] = None
+    password: str
+    profilePic: Optional[str] = None
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: User
 
 class Incident(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -141,12 +157,54 @@ async def get_user(user_id: str):
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
-@api_router.post("/login", response_model=User)
-async def login(login_data: LoginRequest):
-    user = await db.users.find_one({"email": login_data.email}, {"_id": 0})
-    if not user:
+def create_access_token(subject: Dict[str, Any]) -> str:
+    to_encode = subject.copy()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=access_token_expires_minutes)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, jwt_secret, algorithm=jwt_algorithm)
+
+@api_router.post("/auth/signup", response_model=TokenResponse)
+async def auth_signup(payload: SignupRequest):
+    existing = await db.users.find_one({"email": payload.email})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user_doc: Dict[str, Any] = {
+        "id": f"user{uuid.uuid4().hex}",
+        "name": payload.name,
+        "email": payload.email,
+        "phone": payload.phone,
+        "profilePic": payload.profilePic,
+        "bio": None,
+        "profileComplete": False,
+        "level": 1,
+        "points": 0,
+        "responses": 0,
+        "rating": 0.0,
+        "badges": [],
+        "bloodType": None,
+        "allergies": None,
+        "medications": None,
+        "medicalConditions": None,
+        "emergencyContacts": [],
+        "trustedCircle": [],
+        "preferences": {},
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "location": None,
+        "password_hash": bcrypt.hash(payload.password),
+    }
+    await db.users.insert_one(user_doc)
+    public_user = {k: v for k, v in user_doc.items() if k != "password_hash"}
+    token = create_access_token({"sub": public_user["id"], "email": public_user["email"]})
+    return TokenResponse(access_token=token, user=User(**public_user))
+
+@api_router.post("/auth/login", response_model=TokenResponse)
+async def auth_login(login_data: LoginRequest):
+    user = await db.users.find_one({"email": login_data.email})
+    if not user or not bcrypt.verify(login_data.password, user.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    return user
+    public_user = {k: v for k, v in user.items() if k != "password_hash" and k != "_id"}
+    token = create_access_token({"sub": public_user["id"], "email": public_user["email"]})
+    return TokenResponse(access_token=token, user=User(**public_user))
 
 @api_router.post("/users", response_model=User)
 async def create_user(user: User):
@@ -186,15 +244,17 @@ async def create_incident(incident: Incident):
                     print(f"\n[SERVER-SIDE-NOTIFICATION] Sending SMS/WhatsApp to {contact.name} ({contact.phone}):")
                     print(f"Message: {message}\n")
                     
-                    # 2. Twilio Integration (Uncomment and add credentials to .env to enable real sending)
-                    # from twilio.rest import Client
-                    # import os
-                    # account_sid = os.getenv('TWILIO_ACCOUNT_SID')
-                    # auth_token = os.getenv('TWILIO_AUTH_TOKEN')
-                    # from_number = os.getenv('TWILIO_PHONE_NUMBER')
-                    # if account_sid and auth_token and from_number:
-                    #     client = Client(account_sid, auth_token)
-                    #     client.messages.create(body=message, from_=from_number, to=contact.phone)
+                    # 2. Twilio Integration (SMS) - requires environment variables
+                    account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+                    auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+                    from_number = os.getenv('TWILIO_PHONE_NUMBER')
+                    to_number = str(contact.phone).strip()
+                    if account_sid and auth_token and from_number and to_number.startswith('+'):
+                        try:
+                            client = TwilioClient(account_sid, auth_token)
+                            client.messages.create(body=message, from_=from_number, to=to_number)
+                        except Exception as twilio_error:
+                            print(f"Twilio send failed for {to_number}: {twilio_error}")
 
     except Exception as e:
         print(f"Error sending notifications: {e}")
@@ -246,17 +306,20 @@ logger = logging.getLogger(__name__)
 @app.on_event("startup")
 async def startup_db_client():
     try:
-        # Check if users exist
-        if await db.users.count_documents({}) == 0:
-            logger.info("Seeding users...")
-            mock_users = get_mock_users()
-            await db.users.insert_many(mock_users)
-            
-            # Check if incidents exist (only seed if users were seeded to ensure consistency)
-            if await db.incidents.count_documents({}) == 0:
-                logger.info("Seeding incidents...")
-                mock_incidents = get_mock_incidents(mock_users)
-                await db.incidents.insert_many(mock_incidents)
+        # Optional seeding only when using mock DB
+        try:
+            is_mock = isinstance(client, MockClient)
+        except Exception:
+            is_mock = False
+        if is_mock:
+            if await db.users.count_documents({}) == 0:
+                logger.info("Seeding users...")
+                mock_users = get_mock_users()
+                await db.users.insert_many(mock_users)
+                if await db.incidents.count_documents({}) == 0:
+                    logger.info("Seeding incidents...")
+                    mock_incidents = get_mock_incidents(mock_users)
+                    await db.incidents.insert_many(mock_incidents)
     except Exception as e:
         logger.error(f"Error seeding database: {e}")
 

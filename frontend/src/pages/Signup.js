@@ -35,6 +35,7 @@ export default function Signup() {
         name: formData.name,
         email: formData.email,
         phone: formData.phone,
+        password: formData.password,
         profilePic: `https://api.dicebear.com/7.x/avataaars/svg?seed=${formData.name}`
       });
       

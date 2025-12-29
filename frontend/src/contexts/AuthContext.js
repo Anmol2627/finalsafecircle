@@ -26,8 +26,9 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password) => {
     try {
-      const foundUser = await api.login(email, password);
-      
+      const result = await api.login(email, password);
+      const { access_token, user: foundUser } = result;
+      localStorage.setItem('safecircle_token', access_token);
       localStorage.setItem('safecircle_user', JSON.stringify(foundUser));
       setUser(foundUser);
       return { success: true };
@@ -39,18 +40,9 @@ export function AuthProvider({ children }) {
 
   const signup = async (userData) => {
     try {
-      const newUser = {
-        id: `user${Date.now()}`,
-        ...userData,
-        profileComplete: false,
-        level: 1,
-        points: 0,
-        responses: 0,
-        badges: [],
-        createdAt: new Date().toISOString()
-      };
-      
-      const createdUser = await api.createUser(newUser);
+      const result = await api.signup(userData);
+      const { access_token, user: createdUser } = result;
+      localStorage.setItem('safecircle_token', access_token);
       localStorage.setItem('safecircle_user', JSON.stringify(createdUser));
       setUser(createdUser);
       return { success: true };
@@ -62,6 +54,7 @@ export function AuthProvider({ children }) {
 
   const logout = () => {
     localStorage.removeItem('safecircle_user');
+    localStorage.removeItem('safecircle_token');
     setUser(null);
   };
 

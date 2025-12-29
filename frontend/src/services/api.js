@@ -1,5 +1,10 @@
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
 
+function authHeaders() {
+  const token = localStorage.getItem('safecircle_token');
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export const api = {
   // User endpoints
   getUsers: async () => {
@@ -15,7 +20,7 @@ export const api = {
   },
 
   login: async (email, password) => {
-    const response = await fetch(`${API_URL}/login`, {
+    const response = await fetch(`${API_URL}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
@@ -27,20 +32,20 @@ export const api = {
     return response.json();
   },
 
-  createUser: async (userData) => {
-    const response = await fetch(`${API_URL}/users`, {
+  signup: async (payload) => {
+    const response = await fetch(`${API_URL}/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(userData),
+      body: JSON.stringify(payload),
     });
-    if (!response.ok) throw new Error('Failed to create user');
+    if (!response.ok) throw new Error('Failed to sign up');
     return response.json();
   },
 
   updateUser: async (id, updates) => {
     const response = await fetch(`${API_URL}/users/${id}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(updates),
     });
     if (!response.ok) throw new Error('Failed to update user');
@@ -67,7 +72,7 @@ export const api = {
   createIncident: async (incidentData) => {
     const response = await fetch(`${API_URL}/incidents`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(incidentData),
     });
     if (!response.ok) throw new Error('Failed to create incident');

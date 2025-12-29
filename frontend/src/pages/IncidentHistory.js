@@ -7,7 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar';
 import { api } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
-import { Calendar, MapPin, Clock, Star, TrendingUp } from 'lucide-react';
+import { Calendar, MapPin, Clock, Star, TrendingUp, Users, Phone, Info } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { motion } from 'framer-motion';
 
@@ -16,10 +16,16 @@ export default function IncidentHistory() {
   const [filter, setFilter] = useState('all');
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [usersIndex, setUsersIndex] = useState({});
+  const [expanded, setExpanded] = useState({});
 
   useEffect(() => {
     const fetchHistory = async () => {
        try {
+          const users = await api.getUsers();
+          const index = {};
+          users.forEach(u => { index[u.id] = u; });
+          setUsersIndex(index);
           const incidents = await api.getIncidents();
           const myHistory = incidents.filter(inc => 
              inc.victim?.id === user?.id || inc.respondingHelpers?.includes(user?.id)
@@ -48,6 +54,21 @@ export default function IncidentHistory() {
     if (filter === 'all') return true;
     return h.role === filter;
   });
+
+  const getHelperList = (incident) => {
+    const responders = Array.isArray(incident.respondingHelpers) ? incident.respondingHelpers : [];
+    const arrived = Array.isArray(incident.arrivedHelpers) ? incident.arrivedHelpers : [];
+    return responders.map(rid => {
+      const u = usersIndex[rid];
+      const name = u?.name || rid;
+      const status = arrived.includes(rid) ? 'Arrived' : 'Responding';
+      return { id: rid, name, status, phone: u?.phone, profilePic: u?.profilePic };
+    });
+  };
+
+  const toggleExpanded = (id) => {
+    setExpanded(prev => ({ ...prev, [id]: !prev[id] }));
+  };
 
   const totalIncidents = history.length;
   const asVictim = history.filter(h => h.role === 'victim').length;
@@ -174,13 +195,104 @@ export default function IncidentHistory() {
                       
                       <div className="flex items-center gap-1 text-sm text-muted-foreground mb-2">
                         <MapPin className="h-3 w-3" />
-                        {incident.locationName || 'Unknown Location'}
+                        {incident.location?.address || `${incident.location?.lat}, ${incident.location?.lng}` || 'Unknown Location'}
                       </div>
                       
                       {incident.role === 'helper' && (
                         <div className="flex items-center gap-1 text-xs text-yellow-600 bg-yellow-50 px-2 py-1 rounded-full w-fit">
                           <Star className="h-3 w-3 fill-yellow-600" />
                           +50 points earned
+                        </div>
+                      )}
+
+                      <div className="mt-3">
+                        <Button variant="outline" size="sm" onClick={() => toggleExpanded(incident.id)}>
+                          <Info className="h-4 w-4 mr-2" />
+                          {expanded[incident.id] ? 'Hide Details' : 'View Details'}
+                        </Button>
+                      </div>
+
+                      {expanded[incident.id] && (
+                        <div className="mt-4 space-y-3 rounded-lg border p-3">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                            <div>
+                              <p className="text-muted-foreground">Victim</p>
+                              <p className="font-semibold">{incident.victim?.name || 'Unknown'}</p>
+                              {incident.victim?.phone && (
+                                <p className="flex items-center gap-1 text-xs">
+                                  <Phone className="h-3 w-3" />
+                                  {incident.victim.phone}
+                                </p>
+                              )}
+                            </div>
+                            <div>
+                              <p className="text-muted-foreground">When</p>
+                              <p className="font-semibold">
+                                {incident.timestamp ? new Date(incident.timestamp).toLocaleString() : 'Unknown'}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-muted-foreground">Where</p>
+                              <p className="font-semibold">
+                                {incident.location?.address || `${incident.location?.lat}, ${incident.location?.lng}` || 'Unknown'}
+                              </p>
+                              {incident.location?.lat && incident.location?.lng && (
+                                <a
+                                  className="text-primary text-xs"
+                                  href={`https://www.google.com/maps?q=${incident.location.lat},${incident.location.lng}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  Open Map
+                                </a>
+                              )}
+                            </div>
+                            <div>
+                              <p className="text-muted-foreground">Status</p>
+                              <p className="font-semibold">{incident.status || 'Unknown'}</p>
+                            </div>
+                          </div>
+
+                          {incident.description && (
+                            <div className="text-sm">
+                              <p className="text-muted-foreground">Description</p>
+                              <p className="font-semibold">{incident.description}</p>
+                            </div>
+                          )}
+
+                          <div>
+                            <p className="text-muted-foreground text-sm mb-2 flex items-center gap-2">
+                              <Users className="h-4 w-4" />
+                              Responders
+                            </p>
+                            <div className="space-y-2">
+                              {getHelperList(incident).length === 0 ? (
+                                <p className="text-xs text-muted-foreground">No responders recorded</p>
+                              ) : (
+                                getHelperList(incident).map(h => (
+                                  <div key={h.id} className="flex items-center gap-2 text-sm">
+                                    <Avatar className="h-6 w-6">
+                                      <AvatarImage src={h.profilePic} alt={h.name} />
+                                      <AvatarFallback>{h.name[0]}</AvatarFallback>
+                                    </Avatar>
+                                    <span className="font-medium">{h.name}</span>
+                                    <Badge variant="outline" className="ml-auto">{h.status}</Badge>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
+
+                          {Array.isArray(incident.emergencyServicesNotified) && incident.emergencyServicesNotified.length > 0 && (
+                            <div className="text-sm">
+                              <p className="text-muted-foreground">Emergency Services Notified</p>
+                              <div className="flex flex-wrap gap-2 mt-1">
+                                {incident.emergencyServicesNotified.map((svc, i) => (
+                                  <Badge key={i} variant="outline">{svc}</Badge>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>

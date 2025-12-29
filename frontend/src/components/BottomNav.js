@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Home, Map, Trophy, User, Settings } from 'lucide-react';
+import { Home, Map, Trophy, User, Settings, Calendar } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 export function BottomNav() {
@@ -9,6 +9,7 @@ export function BottomNav() {
   const navItems = [
     { path: '/dashboard', icon: Home, label: 'Home' },
     { path: '/map', icon: Map, label: 'Map' },
+    { path: '/history', icon: Calendar, label: 'History' },
     { path: '/leaderboard', icon: Trophy, label: 'Ranks' },
     { path: '/profile', icon: User, label: 'Profile' },
     { path: '/settings', icon: Settings, label: 'Settings' }

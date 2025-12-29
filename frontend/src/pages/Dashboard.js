@@ -126,11 +126,17 @@ export default function Dashboard() {
         
         const createdIncident = await api.createIncident(newIncidentData);
         
-        // WhatsApp Integration - Automatically open WhatsApp
-        const phoneNumber = "919675852627";
-        const message = `SOS Alert! This is ${user?.name || 'a user'}. I need help! Type: ${sosData.type}. Location: https://www.google.com/maps?q=${location.lat},${location.lng}`;
-        const whatsappUrl = `https://wa.me/${phoneNumber}?text=${encodeURIComponent(message)}`;
-        window.open(whatsappUrl, '_blank');
+        // WhatsApp Integration - Send to user's emergency contact
+        const primaryContact = Array.isArray(user?.emergencyContacts) 
+          ? user.emergencyContacts.find(c => c.phone) 
+          : null;
+        const targetNumberRaw = primaryContact?.phone || user?.phone;
+        if (targetNumberRaw) {
+          const phoneNumber = String(targetNumberRaw).replace(/[^\d+]/g, '').replace(/^00/, '+');
+          const message = `SOS Alert! This is ${user?.name || 'a user'}. I need help! Type: ${sosData.type}. Location: https://www.google.com/maps?q=${location.lat},${location.lng}`;
+          const whatsappUrl = `https://wa.me/${phoneNumber.replace('+','') }?text=${encodeURIComponent(message)}`;
+          window.open(whatsappUrl, '_blank');
+        }
 
         toast.success('SOS Alert Sent!', {
           description: 'Nearby helpers and your trusted circle have been notified.'
@@ -190,6 +196,14 @@ export default function Dashboard() {
             >
               <Timer className="h-4 w-4 mr-2" />
               Start Check-in
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate('/history')}
+              className="ml-2"
+            >
+              View History
             </Button>
           </div>
           

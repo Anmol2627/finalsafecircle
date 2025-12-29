@@ -14,6 +14,7 @@ from mock_db import MockClient
 from passlib.hash import bcrypt
 import jwt
 from twilio.rest import Client as TwilioClient
+import re
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -200,8 +201,12 @@ async def auth_signup(payload: SignupRequest):
 @api_router.post("/auth/login", response_model=TokenResponse)
 async def auth_login(login_data: LoginRequest):
     user = await db.users.find_one({"email": login_data.email})
-    if not user or not bcrypt.verify(login_data.password, user.get("password_hash", "")):
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    # Allow login for legacy seeded users without password_hash (demo mode)
+    if "password_hash" in user:
+        if not bcrypt.verify(login_data.password, user.get("password_hash", "")):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
     public_user = {k: v for k, v in user.items() if k != "password_hash" and k != "_id"}
     token = create_access_token({"sub": public_user["id"], "email": public_user["email"]})
     return TokenResponse(access_token=token, user=User(**public_user))
@@ -248,8 +253,10 @@ async def create_incident(incident: Incident):
                     account_sid = os.getenv('TWILIO_ACCOUNT_SID')
                     auth_token = os.getenv('TWILIO_AUTH_TOKEN')
                     from_number = os.getenv('TWILIO_PHONE_NUMBER')
-                    to_number = str(contact.phone).strip()
-                    if account_sid and auth_token and from_number and to_number.startswith('+'):
+                    raw_number = str(contact.phone).strip()
+                    digits = re.sub(r"[^0-9]", "", raw_number)
+                    to_number = f"+{digits}" if not raw_number.startswith("+") else f"+{digits}"
+                    if account_sid and auth_token and from_number and to_number.startswith('+') and len(digits) >= 10:
                         try:
                             client = TwilioClient(account_sid, auth_token)
                             client.messages.create(body=message, from_=from_number, to=to_number)

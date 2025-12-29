@@ -75,7 +75,14 @@ export const api = {
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(incidentData),
     });
-    if (!response.ok) throw new Error('Failed to create incident');
+    if (!response.ok) {
+      let msg = 'Failed to create incident';
+      try {
+        const data = await response.json();
+        msg = data?.detail || msg;
+      } catch {}
+      throw new Error(msg);
+    }
     return response.json();
   },
 

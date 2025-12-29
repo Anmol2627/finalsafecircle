@@ -194,10 +194,15 @@ def create_access_token(subject: Dict[str, Any]) -> str:
 @api_router.post("/auth/signup", response_model=TokenResponse)
 async def auth_signup(payload: SignupRequest):
     if db_backend == 'supabase':
-        resp = client.table('users').select('id').eq('email', payload.email).limit(1).execute()
-        existing = (resp.data or [])
-        if existing:
-            raise HTTPException(status_code=400, detail="Email already registered")
+        try:
+            resp = client.table('users').select('id').eq('email', payload.email).limit(1).execute()
+            if getattr(resp, 'error', None):
+                raise HTTPException(status_code=500, detail=f"Supabase error: {resp.error.get('message')}")
+            existing = (resp.data or [])
+            if existing:
+                raise HTTPException(status_code=400, detail="Email already registered")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Signup check failed: {e}")
     else:
         existing = await db.users.find_one({"email": payload.email})
         if existing:
@@ -229,7 +234,12 @@ async def auth_signup(payload: SignupRequest):
         "password_hash": bcrypt.hash(payload.password),
     }
     if db_backend == 'supabase':
-        client.table('users').insert(user_doc).execute()
+        try:
+            resp_ins = client.table('users').insert(user_doc).execute()
+            if getattr(resp_ins, 'error', None):
+                raise HTTPException(status_code=500, detail=f"Supabase insert error: {resp_ins.error.get('message')}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Signup insert failed: {e}")
     else:
         await db.users.insert_one(user_doc)
     public_user = {k: v for k, v in user_doc.items() if k != "password_hash"}
@@ -239,8 +249,13 @@ async def auth_signup(payload: SignupRequest):
 @api_router.post("/auth/login", response_model=TokenResponse)
 async def auth_login(login_data: LoginRequest):
     if db_backend == 'supabase':
-        resp = client.table('users').select('*').eq('email', login_data.email).limit(1).execute()
-        user = (resp.data or [None])[0]
+        try:
+            resp = client.table('users').select('*').eq('email', login_data.email).limit(1).execute()
+            if getattr(resp, 'error', None):
+                raise HTTPException(status_code=500, detail=f"Supabase error: {resp.error.get('message')}")
+            user = (resp.data or [None])[0]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Login query failed: {e}")
     else:
         user = await db.users.find_one({"email": login_data.email})
     if not user:
@@ -252,6 +267,19 @@ async def auth_login(login_data: LoginRequest):
     public_user = {k: v for k, v in user.items() if k != "password_hash" and k != "_id"}
     token = create_access_token({"sub": public_user["id"], "email": public_user["email"]})
     return TokenResponse(access_token=token, user=User(**public_user))
+
+@api_router.get("/health")
+async def health():
+    try:
+        if db_backend == 'supabase':
+            test = client.table('status_checks').select('id').limit(1).execute()
+            ok = True if not getattr(test, 'error', None) else False
+            return {"status": "ok" if ok else "error", "backend": db_backend}
+        else:
+            count = await db.users.count_documents({})
+            return {"status": "ok", "backend": "mock", "users": count}
+    except Exception as e:
+        return {"status": "error", "backend": db_backend, "error": str(e)}
 
 @api_router.post("/users", response_model=User)
 async def create_user(user: User):
@@ -290,7 +318,12 @@ async def get_incidents():
 async def create_incident(incident: Incident):
     # Save incident to database
     if db_backend == 'supabase':
-        client.table('incidents').insert(incident.model_dump()).execute()
+        try:
+            resp_ins = client.table('incidents').insert(incident.model_dump()).execute()
+            if getattr(resp_ins, 'error', None):
+                raise HTTPException(status_code=500, detail=f"Supabase insert error: {resp_ins.error.get('message')}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Incident insert failed: {e}")
     else:
         await db.incidents.insert_one(incident.model_dump())
     

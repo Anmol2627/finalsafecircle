@@ -321,9 +321,9 @@ async def create_incident(incident: Incident):
         try:
             resp_ins = client.table('incidents').insert(incident.model_dump()).execute()
             if getattr(resp_ins, 'error', None):
-                raise HTTPException(status_code=500, detail=f"Supabase insert error: {resp_ins.error.get('message')}")
+                print(f"Supabase insert error: {resp_ins.error.get('message')}")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Incident insert failed: {e}")
+            print(f"Incident insert failed: {e}")
     else:
         await db.incidents.insert_one(incident.model_dump())
     
@@ -334,7 +334,9 @@ async def create_incident(incident: Incident):
             for contact in victim.emergencyContacts:
                 if contact.phone:
                     # Construct Message
-                    location_url = f"https://www.google.com/maps?q={incident.location.lat},{incident.location.lng}"
+                    lat = incident.location.get('lat') if isinstance(incident.location, dict) else None
+                    lng = incident.location.get('lng') if isinstance(incident.location, dict) else None
+                    location_url = f"https://www.google.com/maps?q={lat},{lng}" if lat is not None and lng is not None else "https://www.google.com/maps"
                     message = f"SOS ALERT! {victim.name} needs help. Type: {incident.type}. Location: {location_url}"
                     
                     # 1. Log to Console (Simulation)

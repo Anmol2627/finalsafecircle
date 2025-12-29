@@ -15,6 +15,7 @@ from passlib.hash import bcrypt
 import jwt
 from twilio.rest import Client as TwilioClient
 import re
+import certifi
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -31,7 +32,11 @@ try:
         logger.info("Using In-Memory Mock Database (data will reset on restart)")
         client = MockClient(mongo_url)
     else:
-        client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
+        client = AsyncIOMotorClient(
+            mongo_url,
+            serverSelectionTimeoutMS=10000,
+            tlsCAFile=certifi.where()
+        )
 except Exception as e:
     print(f"Error initializing DB client: {e}")
     client = MockClient(mongo_url)

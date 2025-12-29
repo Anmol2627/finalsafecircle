@@ -1,7 +1,7 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Body, Depends
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from supabase import create_client, Client
 import os
 import logging
 from pathlib import Path
@@ -20,29 +20,36 @@ import certifi
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
+# Data backend selection
 mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+supabase_url = os.environ.get('SUPABASE_URL', '')
+supabase_key = os.environ.get('SUPABASE_KEY', '')
+jwt_secret = os.environ.get('JWT_SECRET', 'change-me-in-env')
 jwt_secret = os.environ.get('JWT_SECRET', 'change-me-in-env')
 jwt_algorithm = os.environ.get('JWT_ALGORITHM', 'HS256')
 access_token_expires_minutes = int(os.environ.get('ACCESS_TOKEN_EXPIRES_MIN', '60'))
 try:
+    use_supabase = os.environ.get('USE_SUPABASE', 'false').lower() == 'true'
     use_mock = os.environ.get('USE_MOCK_DB', 'false').lower() == 'true'
-    if use_mock:
+    if use_supabase and supabase_url and supabase_key:
+        supabase: Client = create_client(supabase_url, supabase_key)
+        client = supabase
+        db_backend = 'supabase'
+    elif use_mock:
         logger = logging.getLogger("uvicorn")
         logger.info("Using In-Memory Mock Database (data will reset on restart)")
         client = MockClient(mongo_url)
+        db_backend = 'mock'
     else:
-        client = AsyncIOMotorClient(
-            mongo_url,
-            serverSelectionTimeoutMS=10000,
-            tlsCAFile=certifi.where()
-        )
+        client = MockClient(mongo_url)
+        db_backend = 'mock'
 except Exception as e:
     print(f"Error initializing DB client: {e}")
     client = MockClient(mongo_url)
+    db_backend = 'mock'
 
 db_name = os.environ.get('DB_NAME', 'safecircle')
-db = client[db_name]
+db = client if db_backend == 'supabase' else client[db_name]
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -127,10 +134,10 @@ class LocationUpdate(BaseModel):
 
 @api_router.put("/users/{user_id}/location")
 async def update_user_location(user_id: str, location: LocationUpdate):
-    await db.users.update_one(
-        {"id": user_id},
-        {"$set": {"location": location.model_dump()}}
-    )
+    if db_backend == 'supabase':
+        client.table('users').update({"location": location.model_dump()}).eq('id', user_id).execute()
+    else:
+        await db.users.update_one({"id": user_id}, {"$set": {"location": location.model_dump()}})
     return {"status": "success"}
 
 @api_router.post("/status", response_model=StatusCheck)
@@ -139,12 +146,19 @@ async def create_status_check(input: StatusCheckCreate):
     status_obj = StatusCheck(**status_dict)
     doc = status_obj.model_dump()
     doc['timestamp'] = doc['timestamp'].isoformat()
-    await db.status_checks.insert_one(doc)
+    if db_backend == 'supabase':
+        client.table('status_checks').insert(doc).execute()
+    else:
+        await db.status_checks.insert_one(doc)
     return status_obj
 
 @api_router.get("/status", response_model=List[StatusCheck])
 async def get_status_checks():
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
+    if db_backend == 'supabase':
+        resp = client.table('status_checks').select('*').execute()
+        status_checks = resp.data or []
+    else:
+        status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
     for check in status_checks:
         if isinstance(check['timestamp'], str):
             check['timestamp'] = datetime.fromisoformat(check['timestamp'])
@@ -153,12 +167,20 @@ async def get_status_checks():
 # User Routes
 @api_router.get("/users", response_model=List[User])
 async def get_users():
-    users = await db.users.find({}, {"_id": 0}).to_list(1000)
+    if db_backend == 'supabase':
+        resp = client.table('users').select('*').execute()
+        users = resp.data or []
+    else:
+        users = await db.users.find({}, {"_id": 0}).to_list(1000)
     return users
 
 @api_router.get("/users/{user_id}", response_model=User)
 async def get_user(user_id: str):
-    user = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if db_backend == 'supabase':
+        resp = client.table('users').select('*').eq('id', user_id).limit(1).execute()
+        user = (resp.data or [None])[0]
+    else:
+        user = await db.users.find_one({"id": user_id}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -171,7 +193,15 @@ def create_access_token(subject: Dict[str, Any]) -> str:
 
 @api_router.post("/auth/signup", response_model=TokenResponse)
 async def auth_signup(payload: SignupRequest):
-    existing = await db.users.find_one({"email": payload.email})
+    if db_backend == 'supabase':
+        resp = client.table('users').select('id').eq('email', payload.email).limit(1).execute()
+        existing = (resp.data or [])
+        if existing:
+            raise HTTPException(status_code=400, detail="Email already registered")
+    else:
+        existing = await db.users.find_one({"email": payload.email})
+        if existing:
+            raise HTTPException(status_code=400, detail="Email already registered")
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     user_doc: Dict[str, Any] = {
@@ -198,14 +228,21 @@ async def auth_signup(payload: SignupRequest):
         "location": None,
         "password_hash": bcrypt.hash(payload.password),
     }
-    await db.users.insert_one(user_doc)
+    if db_backend == 'supabase':
+        client.table('users').insert(user_doc).execute()
+    else:
+        await db.users.insert_one(user_doc)
     public_user = {k: v for k, v in user_doc.items() if k != "password_hash"}
     token = create_access_token({"sub": public_user["id"], "email": public_user["email"]})
     return TokenResponse(access_token=token, user=User(**public_user))
 
 @api_router.post("/auth/login", response_model=TokenResponse)
 async def auth_login(login_data: LoginRequest):
-    user = await db.users.find_one({"email": login_data.email})
+    if db_backend == 'supabase':
+        resp = client.table('users').select('*').eq('email', login_data.email).limit(1).execute()
+        user = (resp.data or [None])[0]
+    else:
+        user = await db.users.find_one({"email": login_data.email})
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     # Allow login for legacy seeded users without password_hash (demo mode)
@@ -218,27 +255,44 @@ async def auth_login(login_data: LoginRequest):
 
 @api_router.post("/users", response_model=User)
 async def create_user(user: User):
-    await db.users.insert_one(user.model_dump())
+    if db_backend == 'supabase':
+        client.table('users').insert(user.model_dump()).execute()
+    else:
+        await db.users.insert_one(user.model_dump())
     return user
 
 @api_router.put("/users/{user_id}", response_model=User)
 async def update_user(user_id: str, user_update: Dict[str, Any] = Body(...)):
-    result = await db.users.update_one({"id": user_id}, {"$set": user_update})
-    if result.modified_count == 0:
-        raise HTTPException(status_code=404, detail="User not found or no changes made")
-    updated_user = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if db_backend == 'supabase':
+        upd = client.table('users').update(user_update).eq('id', user_id).execute()
+        resp = client.table('users').select('*').eq('id', user_id).limit(1).execute()
+        updated_user = (resp.data or [None])[0]
+        if not updated_user:
+            raise HTTPException(status_code=404, detail="User not found or no changes made")
+    else:
+        result = await db.users.update_one({"id": user_id}, {"$set": user_update})
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="User not found or no changes made")
+        updated_user = await db.users.find_one({"id": user_id}, {"_id": 0})
     return updated_user
 
 # Incident Routes
 @api_router.get("/incidents", response_model=List[Incident])
 async def get_incidents():
-    incidents = await db.incidents.find({}, {"_id": 0}).to_list(1000)
+    if db_backend == 'supabase':
+        resp = client.table('incidents').select('*').execute()
+        incidents = resp.data or []
+    else:
+        incidents = await db.incidents.find({}, {"_id": 0}).to_list(1000)
     return incidents
 
 @api_router.post("/incidents", response_model=Incident)
 async def create_incident(incident: Incident):
     # Save incident to database
-    await db.incidents.insert_one(incident.model_dump())
+    if db_backend == 'supabase':
+        client.table('incidents').insert(incident.model_dump()).execute()
+    else:
+        await db.incidents.insert_one(incident.model_dump())
     
     # Notify Emergency Contacts (Server-Side Automation)
     try:
@@ -275,7 +329,11 @@ async def create_incident(incident: Incident):
 
 @api_router.get("/incidents/{incident_id}", response_model=Incident)
 async def get_incident(incident_id: str):
-    incident = await db.incidents.find_one({"id": incident_id}, {"_id": 0})
+    if db_backend == 'supabase':
+        resp = client.table('incidents').select('*').eq('id', incident_id).limit(1).execute()
+        incident = (resp.data or [None])[0]
+    else:
+        incident = await db.incidents.find_one({"id": incident_id}, {"_id": 0})
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     return incident
@@ -283,7 +341,11 @@ async def get_incident(incident_id: str):
 # Leaderboard Route
 @api_router.get("/leaderboard")
 async def get_leaderboard():
-    users = await db.users.find({}, {"_id": 0}).sort("points", -1).limit(10).to_list(10)
+    if db_backend == 'supabase':
+        resp = client.table('users').select('*').order('points', desc=True).limit(10).execute()
+        users = resp.data or []
+    else:
+        users = await db.users.find({}, {"_id": 0}).sort("points", -1).limit(10).to_list(10)
     leaderboard = []
     for i, user in enumerate(users):
         leaderboard.append({
@@ -291,7 +353,7 @@ async def get_leaderboard():
             "user": user,
             "points": user.get("points", 0),
             "responses": user.get("responses", 0),
-            "change": "0" # Placeholder logic for change
+            "change": "0"
         })
     return leaderboard
 
@@ -318,23 +380,35 @@ logger = logging.getLogger(__name__)
 @app.on_event("startup")
 async def startup_db_client():
     try:
-        # Optional seeding only when using mock DB
-        try:
-            is_mock = isinstance(client, MockClient)
-        except Exception:
-            is_mock = False
-        if is_mock:
-            if await db.users.count_documents({}) == 0:
-                logger.info("Seeding users...")
+        if db_backend == 'supabase':
+            try:
+                users_count = client.table('users').select('id', count='exact').execute().count or 0
+            except Exception:
+                users_count = 0
+            if users_count == 0:
                 mock_users = get_mock_users()
-                await db.users.insert_many(mock_users)
-                if await db.incidents.count_documents({}) == 0:
-                    logger.info("Seeding incidents...")
-                    mock_incidents = get_mock_incidents(mock_users)
-                    await db.incidents.insert_many(mock_incidents)
+                client.table('users').insert(mock_users).execute()
+                mock_incidents = get_mock_incidents(mock_users)
+                client.table('incidents').insert(mock_incidents).execute()
+        else:
+            try:
+                is_mock = isinstance(client, MockClient)
+            except Exception:
+                is_mock = False
+            if is_mock:
+                if await db.users.count_documents({}) == 0:
+                    mock_users = get_mock_users()
+                    await db.users.insert_many(mock_users)
+                    if await db.incidents.count_documents({}) == 0:
+                        mock_incidents = get_mock_incidents(mock_users)
+                        await db.incidents.insert_many(mock_incidents)
     except Exception as e:
         logger.error(f"Error seeding database: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    try:
+        if db_backend != 'supabase':
+            client.close()
+    except Exception:
+        pass

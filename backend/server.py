@@ -398,8 +398,8 @@ app.include_router(api_router)
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
     allow_origins=["*"], # Allow all for now to ensure connectivity
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
